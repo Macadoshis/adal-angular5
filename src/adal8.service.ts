@@ -1,11 +1,10 @@
 import * as adalLib from 'adal-angular';
-import { Adal8User } from './adal8-user';
-import { Injectable } from '@angular/core';
+import { Injectable, NgZone } from '@angular/core';
 import { Observable } from 'rxjs/internal/Observable';
 import { bindCallback } from 'rxjs/internal/observable/bindCallback';
 import { timer } from 'rxjs/internal/observable/timer';
 import { Subscription } from 'rxjs/internal/Subscription';
-import { first } from 'rxjs/operators';
+import { first, map } from 'rxjs/operators';
 import { isFunction } from 'rxjs/internal-compatibility';
 import User = adal.User;
 import DoRefreshExpirationParam = adal.DoRefreshExpirationParam;
@@ -38,12 +37,12 @@ export class Adal8Service {
      *
      *
      * @private
-     * @type {Adal8User}
+     * @type {adal.User}
      * @memberOf Adal8Service
      */
-    private adal8User: Adal8User = {
+    private adal8User: adal.User = {
         authenticated: false,
-        username: '',
+        userName: '',
         error: '',
         token: '',
         profile: {},
@@ -55,7 +54,7 @@ export class Adal8Service {
      *
      * @memberOf Adal8Service
      */
-    constructor() {
+    constructor(private ngZone: NgZone) {
     }
 
     /**
@@ -73,10 +72,10 @@ export class Adal8Service {
      *
      *
      * @readonly
-     * @type {Adal8User}
+     * @type {adal.User}
      * @memberOf Adal8Service
      */
-    public get userInfo(): Adal8User {
+    public get userInfo(): adal.User {
         return this.adal8User;
     }
 
@@ -114,10 +113,7 @@ export class Adal8Service {
         // create instance with given config
         this.adalContext = adalLib.inject(configOptions);
 
-        window.AuthenticationContext = this.adalContext.constructor;
-
-        // loginresource is used to set authenticated status
-        this.updateDataFromCache(this.adalContext.config.loginResource);
+        this.updateDataFromCache();
 
         if (this.adal8User.loginCached && !this.adal8User.authenticated && window.self == window.top && !this.isInCallbackRedirectMode) {
             // Override configuration if no authentication
@@ -165,27 +161,39 @@ export class Adal8Service {
      *
      * @memberOf Adal8Service
      */
-    public handleWindowCallback(): void {
+    public handleWindowCallback(removeHash: boolean = true): void {
         const hash = window.location.hash;
         if (this.adalContext.isCallback(hash)) {
+            let isPopup = false;
+
+            if (this.adalContext._openedWindows.length > 0 && this.adalContext._openedWindows[this.adalContext._openedWindows.length - 1].opener && this.adalContext._openedWindows[this.adalContext._openedWindows.length - 1].opener._adalInstance) {
+                this.adalContext = this.adalContext._openedWindows[this.adalContext._openedWindows.length - 1].opener._adalInstance;
+                isPopup = true;
+            } else if (window.parent && window.parent._adalInstance) {
+                this.adalContext = window.parent._adalInstance;
+            }
+
             const requestInfo = this.adalContext.getRequestInfo(hash);
             this.adalContext.saveTokenFromHash(requestInfo);
+            const callback = this.adalContext._callBackMappedToRenewStates[requestInfo.stateResponse] || this.adalContext.callback;
+
             if (requestInfo.requestType === this.adalContext.REQUEST_TYPE.LOGIN) {
-                this.updateDataFromCache(this.adalContext.config.loginResource);
+                this.updateDataFromCache();
                 this.setupLoginTokenRefreshTimer();
-            } else if (requestInfo.requestType === this.adalContext.REQUEST_TYPE.RENEW_TOKEN) {
-                this.adalContext.callback = window.parent.callBackMappedToRenewStates[requestInfo.stateResponse];
             }
 
             if (requestInfo.stateMatch) {
-                if (typeof this.adalContext.callback === 'function') {
+                if (typeof callback === 'function') {
                     if (requestInfo.requestType === this.adalContext.REQUEST_TYPE.RENEW_TOKEN) {
                         // Idtoken or Accestoken can be renewed
                         if (requestInfo.parameters['access_token']) {
-                            this.adalContext.callback(this.adalContext._getItem(this.adalContext.CONSTANTS.STORAGE.ERROR_DESCRIPTION)
+                            callback(this.adalContext._getItem(this.adalContext.CONSTANTS.STORAGE.ERROR_DESCRIPTION)
                                 , requestInfo.parameters['access_token']);
+                        } else if (requestInfo.parameters['id_token']) {
+                            callback(this.adalContext._getItem(this.adalContext.CONSTANTS.STORAGE.ERROR_DESCRIPTION)
+                                , requestInfo.parameters['id_token']);
                         } else if (requestInfo.parameters['error']) {
-                            this.adalContext.callback(this.adalContext._getItem(this.adalContext.CONSTANTS.STORAGE.ERROR_DESCRIPTION), null);
+                            callback(this.adalContext._getItem(this.adalContext.CONSTANTS.STORAGE.ERROR_DESCRIPTION), null);
                             this.adalContext._renewFailed = true;
                         }
                     }
@@ -194,8 +202,14 @@ export class Adal8Service {
         }
 
         // Remove hash from url
-        if (window.location.hash) {
-            window.location.href = window.location.href.replace(window.location.hash, '');
+        if (removeHash) {
+            if (window.location.hash) {
+                if (window.history.replaceState) {
+                    window.history.replaceState('', '/', window.location.pathname);
+                } else {
+                    window.location.hash = '';
+                }
+            }
         }
     }
 
@@ -222,29 +236,25 @@ export class Adal8Service {
     public acquireToken(resource: string): Observable<string> {
         const _this = this;   // save outer this for inner function
 
-        let errorMessage: string;
-        return bindCallback(acquireTokenInternal, function (token: string) {
-            if (!token && errorMessage) {
-                throw (errorMessage);
-            }
-            return token;
-        })();
-
-        function acquireTokenInternal(cb: any) {
-            let s: string = null;
-
+        return bindCallback<string | null, string | null>((callback) => {
             _this.adalContext.acquireToken(resource, (error: string, tokenOut: string) => {
                 if (error) {
                     _this.adalContext.error('Error when acquiring token for resource: ' + resource, error);
-                    errorMessage = error;
-                    cb(<string>null);
+                    callback(null, error);
                 } else {
-                    cb(tokenOut);
-                    s = tokenOut;
+                    callback(tokenOut, null);
                 }
             });
-            return s;
-        }
+        })()
+            .pipe<string | null>(
+                map((result) => {
+                    if (!result[0] && result[1]) {
+                        throw (result[1]);
+                    }
+
+                    return result[0];
+                })
+            );
     }
 
     /**
@@ -262,7 +272,7 @@ export class Adal8Service {
                     _this.adalContext.error('Error when getting user', error);
                     cb(null);
                 } else {
-                    cb(user);
+                    cb(user || null);
                 }
             });
         })();
@@ -345,29 +355,28 @@ export class Adal8Service {
      * @memberOf Adal8Service
      */
     public refreshDataFromCache() {
-        this.updateDataFromCache(this.adalContext.config.loginResource);
+        this.updateDataFromCache();
     }
 
     /**
      *
      *
      * @private
-     * @param {string} resource
      *
      * @memberOf Adal8Service
      */
-    private updateDataFromCache(resource: string): void {
-        const token = this.adalContext.getCachedToken(resource);
+    private updateDataFromCache(): void {
+        const token = this.adalContext.getCachedToken(<any>this.adalContext.config.loginResource);
         this.adal8User.authenticated = token !== null && token.length > 0;
-        const user = this.adalContext.getCachedUser() || { userName: '', profile: undefined };
+        const user = this.adalContext.getCachedUser() || <adal.User>{ userName: '', profile: undefined };
         if (user) {
-            this.adal8User.username = user.userName;
+            this.adal8User.userName = user.userName;
             this.adal8User.profile = user.profile;
             this.adal8User.token = token;
             this.adal8User.error = this.adalContext.getLoginError();
             this.adal8User.loginCached = true;
         } else {
-            this.adal8User.username = '';
+            this.adal8User.userName = '';
             this.adal8User.profile = {};
             this.adal8User.token = '';
             this.adal8User.error = '';
@@ -437,13 +446,14 @@ export class Adal8Service {
         if (this.loginRefreshTimer) {
             this.loginRefreshTimer.unsubscribe();
         }
-        this.loginRefreshTimer = timer(timerDelay * 1000)
-            .pipe(
-                first()
-            )
-            .subscribe((x) => {
-                this.refreshLoginToken();
-            });
-
+        this.ngZone.runOutsideAngular(() => {
+            this.loginRefreshTimer = timer(timerDelay * 1000)
+                .pipe(
+                    first()
+                )
+                .subscribe((x) => {
+                    this.refreshLoginToken();
+                });
+        });
     }
 }

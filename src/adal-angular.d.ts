@@ -39,6 +39,8 @@ declare namespace adal {
     resource?: string;
     extraQueryParameter?: string;
     navigateToLoginRequestUrl?: boolean;
+    logOutUri?: string;
+    loadFrameTimeout?: number;
     doRefresh: DoRefreshExpiration;
   }
 
@@ -50,6 +52,10 @@ declare namespace adal {
   interface User {
     userName: string;
     profile: any;
+    authenticated: any;
+    error: any;
+    token: any;
+    loginCached: boolean;
   }
 
   /**
@@ -118,6 +124,10 @@ declare namespace adal {
     _getItem: any;
 
     _renewFailed: any;
+
+    _openedWindows: any;
+
+    _callBackMappedToRenewStates: any;
 
     // Original ADAL Types
     instance: string;
@@ -219,8 +229,9 @@ declare namespace adal {
      * Handles redirection after login operation.
      * Gets access token from url and saves token to the (local/session) storage
      * or saves error in case unsuccessful login.
+     * @param {boolean} removeHash - Set to false if you use HashLocationStrategy to retain URL after refresh
      */
-    handleWindowCallback(): void;
+    handleWindowCallback(removeHash: boolean): void;
 
     log(level: number, message: string, error: any): void;
 
@@ -240,6 +251,5 @@ declare namespace adal {
  * @interface Window
  */
 interface Window {
-  AuthenticationContext: any;
-  callBackMappedToRenewStates: any;
+  _adalInstance: adal.AuthenticationContext;
 }
